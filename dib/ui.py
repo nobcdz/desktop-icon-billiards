@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import ipaddress
 import json
 import os
 import queue
@@ -16,24 +17,29 @@ from ctypes import wintypes
 import tkinter as tk
 import win32api
 import win32con
+import win32gui
 from PIL import Image, ImageTk
 from tkinter import messagebox, scrolledtext, ttk
 
 from . import config
 from .display import dpi_context
+from .glass import StatCard, frost_style
 from .instance import acquire_instance, claim_instance_mutex, publish_version
+from .lan import PORT, LanRoom, local_addresses
 from .overlay import BilliardsOverlay
 from .paths import runtime_directory
 from .runner import BilliardsRunner
 from .shell import LayoutSession, ShellDesktop
 from .update import fetch_update, release_entries
 
-BG = '#091411'
-PANEL = '#172a24'
-TEXT = '#f0fbf3'
-MUTED = '#a5beb1'
-ACCENT = '#a6f47a'
-GOLD = '#f5c56d'
+BG = '#101921'
+PANEL = '#1e2c37'
+TEXT = '#eff8fa'
+MUTED = '#aabec9'
+ACCENT = '#b8efd9'
+GOLD = '#f0d3a5'
+FROST = ('#2a3b48', '#1a2732', '#435967')
+MINT_FROST = ('#30534f', '#203b39', '#4c7168')
 
 HINTS = {
     'ready': '瞄准 · 长按蓄力 · 松手击球',
@@ -62,8 +68,12 @@ class DesktopBilliardsApp:
         self.session = None
         self.watchdog = None
         self.donation = None
+        self.lan_room = None
+        self.lan_dialog = None
+        self.lan_status = tk.StringVar(root)
         self.closing = False
         self.player_count = 1
+        self.table_style = config.load_table_style()
         self.deadline = 0.0
         self.journal = runtime_directory() / 'layout.json'
         root.title(config.WINDOW_TITLE)
@@ -77,43 +87,62 @@ class DesktopBilliardsApp:
         publish_version(root, config.VERSION)
         style = ttk.Style(root)
         style.theme_use('clam')
+        root.frost_images = []
+        gap = max(6, round(root.winfo_fpixels('1i') / 16))
         style.configure('Panel.TFrame', background=BG)
-        style.configure('Stats.TFrame', background=PANEL)
         style.configure('Table.TLabel', background=BG, foreground=TEXT,
                         font=('Microsoft YaHei UI', 9))
         style.configure('Muted.TLabel', background=BG, foreground=MUTED,
                         font=('Microsoft YaHei UI', 8))
         style.configure('Hero.TLabel', background=BG, foreground=TEXT,
                         font=('Microsoft YaHei UI', 17, 'bold'))
-        style.configure('Status.TLabel', background=PANEL, foreground=ACCENT,
-                        font=('Microsoft YaHei UI', 10, 'bold'), padding=(12, 9))
-        style.configure('StatTitle.TLabel', background=PANEL, foreground=MUTED,
-                        font=('Microsoft YaHei UI', 9))
-        style.configure('StatValue.TLabel', background=PANEL, foreground=TEXT,
-                        font=('Segoe UI', 23, 'bold'))
-        style.configure('Score.TLabel', background=PANEL, foreground=MUTED,
-                        font=('Microsoft YaHei UI', 10, 'bold'), padding=(12, 8))
-        style.configure('Active.Score.TLabel', background='#36572c', foreground='#e2ffcb')
-        style.configure('Winner.Score.TLabel', background='#5b4424', foreground='#fff0c6')
+        frost_style(style, root, 'Status.TLabel', 'Label', MINT_FROST)
+        style.configure('Status.TLabel', foreground=ACCENT,
+                        font=('Microsoft YaHei UI', 10, 'bold'), padding=(13, 9))
+        for name, palette, color in (
+            ('Score.TLabel', FROST, MUTED),
+            ('Active.Score.TLabel', MINT_FROST, ACCENT),
+            ('Winner.Score.TLabel', ('#554534', '#392d25', '#806c52'), GOLD),
+        ):
+            frost_style(style, root, name, 'Label', palette)
+            style.configure(name, foreground=color, font=('Microsoft YaHei UI', 10, 'bold'), padding=(12, 7))
         style.configure('Table.TButton', padding=(11, 6), font=('Microsoft YaHei UI', 9),
-                        background=PANEL, foreground=TEXT, borderwidth=0,
-                        focusthickness=1, focuscolor=ACCENT)
-        style.map('Table.TButton',
-                  background=[('active', '#1d3531'), ('pressed', '#24423c')],
-                  foreground=[('disabled', MUTED)])
-        style.configure('Primary.Table.TButton', background=ACCENT, foreground=BG)
-        style.map('Primary.Table.TButton', background=[('pressed', '#87d15c'), ('active', '#c3ffa0')])
-        style.configure('GuideOn.Table.TButton', background='#234e42', foreground='#a5f8d5')
-        style.map('GuideOn.Table.TButton', background=[('pressed', '#1d4438'), ('active', '#2c5e50')])
-        style.configure('GuideOff.Table.TButton', background='#303d3b', foreground='#c0cecb')
-        style.map('GuideOff.Table.TButton', background=[('pressed', '#25302e'), ('active', '#3d4b48')])
+                        foreground=TEXT)
+        style.map('Table.TButton', foreground=[('disabled', MUTED)])
+        variants = (
+            ('disabled', ('#202b34', '#19242e', '#2c3d48')),
+            ('pressed', ('#253644', '#17252f', '#53727d')),
+            ('focus', ('#344d59', '#263a46', '#8bc6b8')),
+            ('active', ('#3a4e5b', '#283c48', '#5f7d89')),
+        )
+        frost_style(style, root, 'Table.TButton', 'Button', FROST, variants)
+        frost_style(style, root, 'GuideOn.Table.TButton', 'Button', MINT_FROST, variants)
+        frost_style(style, root, 'Primary.Table.TButton', 'Button', ('#bcebd9', '#91cbb9', '#e3fff3'), (
+            variants[0],
+            ('pressed', ('#8ec6b5', '#75a999', '#c5f3e4')),
+            ('focus', ('#c9f6e6', '#a8dbcc', '#ffffff')),
+            ('active', ('#d5faed', '#a5dfce', '#f1fff9')),
+        ))
+        style.configure('Primary.Table.TButton', foreground='#102d28')
+        style.configure('GuideOn.Table.TButton', foreground=ACCENT)
+        style.configure('GuideOff.Table.TButton', foreground=MUTED)
         style.configure('Donate.Table.TButton', foreground=GOLD)
+        style.configure('Table.TCombobox', foreground=TEXT, background=PANEL, arrowcolor=ACCENT,
+                        bordercolor='#435967', lightcolor=PANEL, darkcolor=PANEL,
+                        padding=5, font=('Microsoft YaHei UI', 9))
+        style.map('Table.TCombobox', fieldbackground=[('readonly', PANEL), ('disabled', BG)],
+                  selectbackground=[('readonly', PANEL)], selectforeground=[('readonly', TEXT)])
 
-        tk.Frame(root, bg=ACCENT, height=3).pack(fill='x')
-        hero = ttk.Frame(root, padding=(16, 10, 16, 9), style='Panel.TFrame')
+        tk.Frame(root, bg='#4c7168', height=1).pack(fill='x')
+        hero = ttk.Frame(root, padding=(18, 14, 18, 12), style='Panel.TFrame')
         hero.pack(fill='x')
         ttk.Label(hero, text=config.PRODUCT_NAME, style='Hero.TLabel').pack(side='left')
         ttk.Label(hero, text=f'v{config.VERSION}', style='Muted.TLabel').pack(side='right')
+        self.table_picker = ttk.Combobox(hero, values=tuple(config.TABLE_STYLES.values()), width=10,
+                                        state='readonly', style='Table.TCombobox')
+        self.table_picker.set(config.TABLE_STYLES[self.table_style])
+        self.table_picker.pack(side='right', padx=(8, 9))
+        self.table_picker.bind('<<ComboboxSelected>>', self.change_table_style)
         controls = ttk.Frame(root, padding=(16, 0, 16, 10), style='Panel.TFrame')
         controls.pack(fill='x')
         self.mode_buttons = []
@@ -121,7 +150,7 @@ class DesktopBilliardsApp:
             button = ttk.Button(controls, text=title, width=5,
                                 command=lambda count=players: self.change_mode(count),
                                 style='Primary.Table.TButton' if players == 1 else 'Table.TButton')
-            button.pack(side='left', padx=(0, 4))
+            button.pack(side='left', padx=(0, gap))
             self.mode_buttons.append(button)
         self.status = tk.StringVar(root, value='正在摆球…')
         self.guide_enabled = True
@@ -131,9 +160,9 @@ class DesktopBilliardsApp:
         self.sound_enabled = False
         self.sound_button = ttk.Button(controls, text='声音 · 关', width=8, command=self.toggle_sound,
                                        style='GuideOff.Table.TButton')
-        self.sound_button.pack(side='right', padx=(0, 6))
+        self.sound_button.pack(side='right', padx=(0, gap))
         ttk.Label(root, textvariable=self.status, width=33, style='Status.TLabel').pack(
-            fill='x', padx=16, pady=(0, 6))
+            fill='x', padx=16, pady=(0, 9))
 
         self.scoreboard = ttk.Frame(root, style='Panel.TFrame')
         self.score_labels = []
@@ -155,20 +184,22 @@ class DesktopBilliardsApp:
                                                 (self.count_title, self.count_value),
                                                 (remaining_title, self.remaining_value))):
             stats.columnconfigure(column, weight=1, uniform='stats')
-            card = ttk.Frame(stats, padding=(11, 7), style='Stats.TFrame')
-            card.grid(row=0, column=column, sticky='nsew', padx=(0, 6) if column < 2 else 0)
-            ttk.Label(card, textvariable=title, style='StatTitle.TLabel').pack(anchor='w')
-            ttk.Label(card, textvariable=value, style='StatValue.TLabel').pack(anchor='w')
+            card = StatCard(stats, title, value, BG, MINT_FROST if column == 1 else FROST,
+                            MUTED, ACCENT if column == 1 else TEXT)
+            card.grid(row=0, column=column, sticky='nsew', padx=(0, gap) if column < 2 else 0)
 
         bar = ttk.Frame(root, padding=(14, 10, 14, 7), style='Panel.TFrame')
         bar.pack(fill='x')
-        ttk.Button(bar, text='重新开始', command=self.restart, style='Primary.Table.TButton').pack(side='left')
+        self.restart_button = ttk.Button(bar, text='重新开始', command=self.restart, style='Primary.Table.TButton')
+        self.restart_button.pack(side='left')
+        self.lan_button = ttk.Button(bar, text='局域网', command=self.show_lan, style='Table.TButton')
+        self.lan_button.pack(side='left', padx=(gap, 0))
         self.update_button = ttk.Button(bar, text='检查更新', command=lambda: self.check_updates(manual=True),
                                         style='Table.TButton')
-        self.update_button.pack(side='left', padx=(6, 0))
+        self.update_button.pack(side='left', padx=(gap, 0))
         ttk.Button(bar, text='退出', command=self.close, style='Table.TButton').pack(side='right')
         ttk.Button(bar, text='打赏', command=self.show_donation,
-                   style='Donate.Table.TButton').pack(side='right', padx=(0, 6))
+                   style='Donate.Table.TButton').pack(side='right', padx=gap)
         footer = ttk.Frame(root, padding=(14, 0, 14, 9), style='Panel.TFrame')
         footer.pack(fill='x')
         ttk.Label(footer, text='Esc / Ctrl+Alt+X 退出并恢复桌面', style='Muted.TLabel').pack(side='left')
@@ -179,6 +210,9 @@ class DesktopBilliardsApp:
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.bind('<Escape>', lambda event: self.close())
         root.update_idletasks()
+        hwnd = win32gui.GetAncestor(root.winfo_id(), win32con.GA_ROOT)
+        dark = ctypes.c_int(1)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(ctypes.c_void_p(hwnd), 20, ctypes.byref(dark), ctypes.sizeof(dark))
         monitor = win32api.MonitorFromPoint((0, 0), win32con.MONITOR_DEFAULTTOPRIMARY)
         left, top, right, _ = win32api.GetMonitorInfo(monitor)['Work']
         root.geometry(f'+{max(left, right - root.winfo_reqwidth() - 18)}+{top + 8}')
@@ -186,6 +220,102 @@ class DesktopBilliardsApp:
             None, config.HOTKEY_ID, config.HOTKEY_MODIFIERS, config.HOTKEY_VK))
         root.after(20, self.start)
         root.after(1500, self.check_updates)
+
+    def show_lan(self):
+        if self.lan_dialog is not None and self.lan_dialog.winfo_exists():
+            self.lan_dialog.lift()
+            return
+        self.lan_dialog = dialog = tk.Toplevel(self.root)
+        dialog.title('局域网对战')
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        panel = ttk.Frame(dialog, padding=16)
+        panel.pack(fill='both', expand=True)
+        addresses = '、'.join(local_addresses()) or '请用 ipconfig 查看本机 IPv4 地址'
+        ttk.Label(panel, text=f'本机 IPv4：{addresses}', wraplength=340).pack(anchor='w')
+        ttk.Label(panel, text=f'双方需处于同一局域网。房主共享球面图标，使用 TCP {PORT}。',
+                  wraplength=340).pack(anchor='w', pady=(5, 12))
+        entry = ttk.Entry(panel, width=27)
+        entry.pack(anchor='w', fill='x')
+        ttk.Label(panel, text='房主 IPv4 地址填在上方，8 位房间码填在下方。').pack(anchor='w', pady=(4, 4))
+        code = ttk.Entry(panel, width=12)
+        code.pack(anchor='w', pady=(0, 8))
+        actions = ttk.Frame(panel)
+        actions.pack(fill='x')
+        ttk.Button(actions, text='创建房间', command=lambda: self.start_lan(True)).pack(side='left')
+        ttk.Button(actions, text='加入房间', command=lambda: self.start_lan(False, entry.get(), code.get())).pack(
+            side='left', padx=6)
+        ttk.Button(actions, text='离开房间', command=self.leave_lan).pack(side='right')
+        ttk.Label(panel, textvariable=self.lan_status, wraplength=340).pack(anchor='w', pady=(10, 0))
+        for field in (entry, code):
+            field.bind('<Return>', lambda event: self.start_lan(False, entry.get(), code.get()))
+        dialog.bind('<Escape>', lambda event: dialog.destroy())
+        entry.focus_set()
+
+    def start_lan(self, host, address='', code=''):
+        if self.lan_room is not None:
+            return
+        if (self.runner is None or not self.runner.shown.is_set()
+                or self.runner.overlay.table_style != self.table_style):
+            self.lan_status.set('请等待球台摆好后再联机。')
+            return
+        if not host:
+            try:
+                address = str(ipaddress.IPv4Address(address.strip()))
+            except ValueError:
+                self.lan_status.set('请输入有效的 IPv4 地址。')
+                return
+            code = code.strip()
+            if len(code) != 8 or not code.isascii() or not code.isdecimal():
+                self.lan_status.set('请输入 8 位房间码。')
+                return
+        self.lan_room = self.runner.overlay.room = LanRoom(host, address, code=code)
+        self.lan_status.set('正在创建房间…' if host else '正在连接房主…')
+        self.lan_button.configure(text='联机中')
+        self.restart_button.state(['disabled'])
+        self.table_picker.state(['disabled'])
+        for button in self.mode_buttons:
+            button.state(['disabled'])
+        self.show_scores(True)
+
+    def leave_lan(self):
+        if self.lan_room is not None:
+            self.lan_room.close()
+            self.lan_status.set('正在离开房间…')
+
+    def lan_hint(self, table, label):
+        room = self.lan_room
+        if room is None:
+            return label
+        if room.finished.is_set():
+            self.lan_room = None
+            self.runner.overlay.room = None
+            self.lan_button.configure(text='局域网')
+            self.restart_button.state(['!disabled'])
+            self.table_picker.state(['!disabled'])
+            self.table_picker.set(config.TABLE_STYLES[self.table_style])
+            for button in self.mode_buttons:
+                button.state(['!disabled'])
+            self.show_scores(self.player_count == 2)
+            reason = room.error or '已离开房间，返回本地模式。'
+            self.lan_status.set(reason)
+            return '联机结束 · 返回本地模式'
+        if room.stopping.is_set():
+            return '正在离开房间…'
+        if not room.connected.is_set():
+            if room.host and room.listening.is_set():
+                self.lan_status.set(f'等待对方加入。把本机 IPv4 地址和房间码 {room.code} 发给朋友。')
+                return '等待对方加入…'
+            return self.lan_status.get()
+        local_player = 0 if room.host else 1
+        self.lan_status.set(f'连接成功，你是玩家 {local_player + 1}。关闭此窗口即可返回球台。')
+        if room.host:
+            self.restart_button.state(['!disabled'])
+        if table.player_count != 2 or getattr(table, 'serial', 0) < 0:
+            return '正在同步球阵…'
+        if table.state != 'finished':
+            return f'你的回合 · {label}' if table.current_player == local_player else '对方回合 · 请等待'
+        return label
 
     def show_donation(self):
         if self.donation is not None and self.donation.winfo_exists():
@@ -283,7 +413,7 @@ class DesktopBilliardsApp:
                 item['name'] = desktop.folder.GetDisplayNameOf(
                     [desktop.cache[item['id']]], desktop.shellcon.SHGDN_NORMAL)
             with dpi_context(-4):
-                overlay = BilliardsOverlay(desktop, items)
+                overlay = BilliardsOverlay(desktop, items, self.table_style)
                 overlay.guide_enabled = self.guide_enabled
                 overlay.sound_enabled = self.sound_enabled
                 if self.player_count == 2:
@@ -355,7 +485,7 @@ class DesktopBilliardsApp:
                         score_style = 'Winner.Score.TLabel' if player == winner else (
                             'Active.Score.TLabel' if active else 'Score.TLabel')
                         score_label.configure(text=f'玩家 {player + 1}   {scores[player]} 分', style=score_style)
-                self.status.set(label)
+                self.status.set(self.lan_hint(table, label))
                 minutes, seconds = divmod(table.round_seconds, 60)
                 self.time_value.set(f'{minutes:02d}:{seconds:02d}')
                 total = len(table.icons)
@@ -370,22 +500,42 @@ class DesktopBilliardsApp:
             self.fail(exc)
 
     def restart(self):
-        if self.runner:
+        if self.runner and (self.lan_room is None or self.lan_room.host and self.lan_room.connected.is_set()):
             self.runner.overlay.request_restart(self.player_count)
 
-    def change_mode(self, player_count):
-        if player_count == self.player_count:
+    def change_table_style(self, _event):
+        if self.lan_room is not None:
             return
-        self.player_count = player_count
-        for players, button in enumerate(self.mode_buttons, 1):
-            button.configure(style='Primary.Table.TButton' if players == player_count else 'Table.TButton')
-        if player_count == 2:
+        selected = self.table_picker.current()
+        if selected < 0:
+            return
+        style = tuple(config.TABLE_STYLES)[selected]
+        if style == self.table_style:
+            return
+        self.table_style = style
+        if self.runner:
+            self.runner.overlay.request_restart(self.player_count, style)
+        try:
+            config.save_table_style(style)
+        except OSError as exc:
+            _write_log('settings.log', str(exc))
+
+    def show_scores(self, show):
+        if show:
             for player, label in enumerate(self.score_labels):
                 label.configure(text=f'玩家 {player + 1}   0 分',
                                 style='Active.Score.TLabel' if player == 0 else 'Score.TLabel')
             self.scoreboard.pack(before=self.stats, fill='x', padx=16, pady=(0, 6))
         else:
             self.scoreboard.pack_forget()
+
+    def change_mode(self, player_count):
+        if self.lan_room is not None or player_count == self.player_count:
+            return
+        self.player_count = player_count
+        for players, button in enumerate(self.mode_buttons, 1):
+            button.configure(style='Primary.Table.TButton' if players == player_count else 'Table.TButton')
+        self.show_scores(player_count == 2)
         self.restart()
 
     def toggle_guide(self):
@@ -414,6 +564,8 @@ class DesktopBilliardsApp:
         self.close()
 
     def restore(self):
+        if self.lan_room is not None:
+            self.lan_room.close()
         if self.runner:
             self.runner.stop()
             self.runner = None

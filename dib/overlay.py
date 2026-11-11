@@ -24,8 +24,10 @@ from PIL import Image, ImageDraw, ImageFont
 from .art import charge_art, cue_art, guide_art, numbered_ball_art, pocket_particles, table_art, table_photo, white_art
 from .config import ASSETS
 from .display import monitors
+from .lan import FRAME_INTERVAL, RemoteTable, apply_input, decode_balls, encode_balls, snapshot
 from .shell import ShellDesktop
 from .table import MIN_SHOT_CHARGE, BilliardsMotion
+from .wallpaper import primary_wallpaper
 
 BALL_CANVAS = 128
 INTRO_DURATION = 1.25
@@ -250,9 +252,10 @@ class TablePointer:
 class BilliardsOverlay:
     """Own the layered windows and the printable-level state of the table."""
 
-    def __init__(self, desktop, items):
+    def __init__(self, desktop, items, table_style='photo'):
         self.desktop = desktop
         self.items = items
+        self.table_style = table_style
         self.table = None
         self.windows = []
         self.surfaces = {}
@@ -262,6 +265,13 @@ class BilliardsOverlay:
         self.drawn = []
         self.poses = []
         self.transition = None
+        self.room = None
+        self.active_room = None
+        self.local_game = None
+        self.lan_serial = 0
+        self.lan_next_frame = 0.
+        self.lan_next_collision = 0.
+        self.guest_style = None
         self.restart_requests = SimpleQueue()
         self.pointer = TablePointer()
         self.table_windows = {}
@@ -283,6 +293,7 @@ class BilliardsOverlay:
         self.rects = [[map_rect(rect, list_origin, parent_origin) for rect in pair]
                       for pair in item_rects(self.listview, len(items))]
         primary = next(m for m in self.monitor_state if m[4])
+        self.primary_screen, self.primary_work = primary[1:3]
         self.primary_bounds = map_rect(primary[2], (0, 0), parent_origin)
         self.charge_font = _load_font(max(12, round(14 * primary[3] / 96)))
         left, top, right, bottom = win32gui.GetClientRect(self.parent)
@@ -322,21 +333,32 @@ class BilliardsOverlay:
                 source = artwork(item['id'], size)
                 source.thumbnail((size, size), Image.Resampling.LANCZOS)
                 self.sources.append(source)
-            try:
-                with Image.open(ASSETS / 'table.png') as source:
-                    photo = table_photo(self.primary_bounds, source)
-            except OSError:
-                photo = None
-            photo_rect = None
-            if photo is not None:
-                frame, x, y = photo
-                photo_rect = (x, y, frame.width, frame.height)
-            self.build_templates(photo_rect)
-            self.rail_frame = photo if photo is not None else table_art(self.table)
+            self.build_templates()
+            self.table, self.rail_frame = self.make_table(self.table_style)
         finally:
             comtypes.CoUninitialize()
 
-    def build_templates(self, photo_rect=None):
+    def make_table(self, style):
+        sizes = [source.size for source in self.sources]
+        if style == 'photo':
+            with Image.open(ASSETS / 'table.png') as source:
+                photo = table_photo(self.primary_bounds, source)
+            frame, x, y = photo
+            return BilliardsMotion(self.primary_bounds, sizes, (x, y, frame.width, frame.height)), photo
+        screens = [monitor[1] for monitor in self.monitor_state]
+        desktop = (min(rect[0] for rect in screens), min(rect[1] for rect in screens),
+                   max(rect[2] for rect in screens), max(rect[3] for rect in screens))
+        comtypes.CoInitialize()
+        try:
+            wallpaper = primary_wallpaper(self.primary_screen, desktop)
+        finally:
+            comtypes.CoUninitialize()
+        if wallpaper is not None:
+            wallpaper = wallpaper.crop(map_rect(self.primary_work, (0, 0), self.primary_screen[:2]))
+        table = BilliardsMotion(self.primary_bounds, sizes)
+        return table, table_art(table, wallpaper)
+
+    def build_templates(self):
         """Build label canvases and the resting pose each icon starts from."""
         self.frame_cache = OrderedDict()
         self.frame_cache_bytes = 0
@@ -381,19 +403,15 @@ class BilliardsOverlay:
             # Resting pose at the real desktop position, before the rack is built.
             self.poses.append((left + center, top + bottom - diameter / 2,
                                diameter, diameter, 0, 0, 1.0))
-        self.table = BilliardsMotion(self.primary_bounds, [source.size for source in self.sources], photo_rect)
 
     # -- lifecycle ---------------------------------------------------------
     def show(self, snapshot, journal):
         from .shell import atomic_json
 
         try:
-            for _ in self.items:
-                hwnd = win32gui.CreateWindowEx(
-                    WS_EX_LAYERED | 0x20 | WS_EX_NOACTIVATE, self.classname, '', win32con.WS_CHILD,
-                    0, 0, 1, 1, self.parent, 0, win32api.GetModuleHandle(None), None)
-                self.windows.append(hwnd)
-            self.transition = {'elapsed': 0.0, 'origins': [list(pose) for pose in self.poses]}
+            origins = [list(pose) for pose in self.poses]
+            self.resize_ball_windows(len(self.items))
+            self.transition = {'elapsed': 0.0, 'origins': origins}
             self.draw(0.0, 0.016)
             snapshot['hidden_listview'] = self.listview
             atomic_json(journal, snapshot)
@@ -405,8 +423,147 @@ class BilliardsOverlay:
             self.close()
             raise
 
-    def request_restart(self, player_count):
-        self.restart_requests.put(player_count)
+    def request_restart(self, player_count, table_style=None):
+        self.restart_requests.put((player_count, table_style))
+
+    def resize_ball_windows(self, count):
+        while len(self.windows) < count:
+            hwnd = win32gui.CreateWindowEx(
+                WS_EX_LAYERED | 0x20 | WS_EX_NOACTIVATE, self.classname, '', win32con.WS_CHILD,
+                0, 0, 1, 1, self.parent, 0, win32gui.GetModuleHandle(None), None)
+            self.windows.append(hwnd)
+        for hwnd in self.windows[count:]:
+            win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
+        self.drawn = [None] * count
+        self.poses = [None] * count
+        self.frame_cache.clear()
+        self.frame_cache_bytes = 0
+
+    def reset_pointer(self):
+        self.pointer = TablePointer()
+        self.table.charge = 0.
+
+    def sync_room(self, now):
+        room = self.room
+        if room and (room.finished.is_set() or room.stopping.is_set()):
+            room = None
+        if self.active_room is not room:
+            if self.local_game is not None:
+                self.table, self.sources, player_count = self.local_game
+                if self.guest_style is not None and self.guest_style != self.table_style:
+                    self.table, self.rail_frame = self.make_table(self.table_style)
+                self.guest_style = None
+                self.table.reset(player_count)
+                self.resize_ball_windows(len(self.sources))
+                self.local_game = None
+                self.reset_pointer()
+            self.active_room = room
+            if room is not None:
+                self.reset_pointer()
+        if room is None or not room.connected.is_set():
+            return room
+        if self.local_game is None:
+            if room.host:
+                balls = encode_balls(self.sources)
+                room.send('setup', [self.table.bounds, balls, self.table_style])
+            self.local_game = self.table, self.sources, self.table.player_count
+            self.lan_serial = 0
+            self.lan_next_frame = now
+            self.lan_next_collision = now
+            if room.host:
+                self.table.reset(2)
+                self.resize_ball_windows(len(self.sources))
+                self.reset_pointer()
+        return room
+
+    def draw_guest(self, room, now):
+        pocketed = False
+        collision = False
+        while True:
+            try:
+                kind, payload = room.incoming.get_nowait()
+            except Empty:
+                break
+            if kind == 'setup':
+                if isinstance(self.table, RemoteTable):
+                    raise ValueError('收到重复的局域网球阵。')
+                bounds, balls, style = payload
+                sources = decode_balls(balls)
+                local = self.table
+                if style != self.table_style:
+                    local, self.rail_frame = self.make_table(style)
+                self.guest_style = style
+                self.table = RemoteTable(room, local, bounds, len(sources))
+                self.sources = sources
+                self.resize_ball_windows(len(sources))
+                self.reset_pointer()
+            elif kind == 'collision':
+                collision = True
+        if not isinstance(self.table, RemoteTable):
+            return
+        try:
+            state = room.incoming_state.get_nowait()
+        except Empty:
+            pass
+        else:
+            previous_player = self.table.current_player
+            previous_count = self.table.pocketed_icons
+            self.table.receive(state)
+            if previous_player != self.table.current_player:
+                self.reset_pointer()
+            pocketed = self.table.pocketed_icons > previous_count
+        if self.table.serial < 0:
+            return
+        if self.table.current_player == 1 and self.table.state in ('ready', 'ball_in_hand'):
+            self.update_pointer(now)
+            if now >= self.lan_next_frame or self.table.action is not None:
+                self.table.send_input()
+                self.lan_next_frame = now + FRAME_INTERVAL
+        else:
+            self.pointer = TablePointer()
+        self.play_table_sound(now, pocketed, collision)
+        self.draw_balls()
+
+    def draw_local(self, room, now, dt):
+        try:
+            player_count, table_style = self.restart_requests.get_nowait()
+        except Empty:
+            pass
+        else:
+            if not room and table_style is not None and table_style != self.table_style:
+                self.table, self.rail_frame = self.make_table(table_style)
+                self.table_style = table_style
+            self.table.reset(2 if room else player_count)
+            self.lan_serial += 1
+            self.reset_pointer()
+            self.drawn = [None] * len(self.sources)
+        if room:
+            while True:
+                try:
+                    _, payload = room.incoming.get_nowait()
+                except Empty:
+                    break
+                if apply_input(self.table, self.lan_serial, payload):
+                    self.lan_serial += 1
+        if room is None or self.table.current_player == 0:
+            before = self.table.state
+            self.update_pointer(now)
+            if room and before == 'ready' and self.table.state == 'stroke':
+                self.lan_serial += 1
+        else:
+            self.pointer = TablePointer()
+        pocketed_before = self.table.pocketed_icons
+        self.table.step(dt, now)
+        pocketed = self.table.pocketed_icons > pocketed_before
+        collision = self.table.collision_impulse >= self.table.height * .018
+        self.play_table_sound(now, pocketed, collision)
+        if room and collision and now >= self.lan_next_collision:
+            room.send('collision', None)
+            self.lan_next_collision = now + .075
+        if room and (now >= self.lan_next_frame or pocketed):
+            room.send('state', snapshot(self.table, self.lan_serial), replace=True)
+            self.lan_next_frame = now + FRAME_INTERVAL
+        self.draw_balls()
 
     def draw(self, now, dt):
         if self.desktop.get_geometry() != self.geometry:
@@ -419,30 +576,31 @@ class BilliardsOverlay:
             self.draw_intro(now, dt)
         else:
             try:
-                player_count = self.restart_requests.get_nowait()
-            except Empty:
-                pass
-            else:
-                self.table.reset(player_count)
-                self.pointer = TablePointer()
-                self.drawn = [None] * len(self.items)
-            self.update_pointer(now)
-            pocketed_before = self.table.pocketed_icons
-            self.table.step(dt, now)
-            self.play_table_sound(now, self.table.pocketed_icons > pocketed_before)
-            self.draw_balls()
+                room = self.sync_room(now)
+                if room is None:
+                    self.draw_local(None, now, dt)
+                elif room.connected.is_set() and self.local_game is not None:
+                    if room.host:
+                        self.draw_local(room, now, dt)
+                    else:
+                        self.draw_guest(room, now)
+            except (ValueError, TypeError, KeyError, IndexError, OSError, OverflowError) as exc:
+                if self.active_room is None:
+                    raise
+                self.active_room.error = f'联机已断开：{exc}'
+                self.active_room.close()
         self.draw_table()
         self.draw_guide()
         self.draw_charge()
 
-    def play_table_sound(self, now, pocketed):
+    def play_table_sound(self, now, pocketed, collision):
         if not self.sound_enabled:
             if self.sound_until:
                 self.stop_table_sound()
             return
         if pocketed:
             sound, cooldown = 'pocket.wav', .49
-        elif now >= self.sound_until and self.table.collision_impulse >= self.table.height * .018:
+        elif now >= self.sound_until and collision:
             sound, cooldown = 'collision.wav', .075
         else:
             return
@@ -533,6 +691,8 @@ class BilliardsOverlay:
             if fade:
                 frame = pocket_particles(frame, index, fade)
             self.present(hwnd, frame, round(cx - BALL_CANVAS / 2), round(cy - BALL_CANVAS / 2))
+            if not win32gui.IsWindowVisible(hwnd):
+                win32gui.ShowWindow(hwnd, win32con.SW_SHOWNOACTIVATE)
             self.drawn[index] = key
 
     def sprite_frame(self, source, identity, width, height, angle, alpha=255):
@@ -578,16 +738,21 @@ class BilliardsOverlay:
     def draw_table(self):
         table = self.table
         if 'rail' not in self.table_windows:
-            hwnd = self.table_window('rail')
+            self.table_window('rail')
+            self.table_window('guide')
+        if self.rail_frame is not None:
+            hwnd = self.table_windows['rail']
             self.present(hwnd, *self.rail_frame)
             self.rail_frame = None
             self.position_layer(hwnd, win32con.HWND_BOTTOM, win32con.SWP_SHOWWINDOW)
-            self.table_window('guide')
         white = table.white
         if 'white' not in self.table_windows:
             self.table_window('white')
+        if self.white_frame is None or self.white_radius != white.radius:
             self.white_frame = white_art(white.radius, shaded=True)
-            self.white_position = None
+            self.white_radius = white.radius
+            if not table.white_sunk:
+                self.white_position = None
         hwnd = self.table_windows['white']
         if table.white_sunk:
             if self.white_position is not None:

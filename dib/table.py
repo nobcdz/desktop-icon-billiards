@@ -17,6 +17,7 @@ RAIL_REBOUND = .88
 BALL_IMPULSE = .96
 ROLLING_DRAG = .45
 STOP_SPEED = .008
+HEAD_SPOT = .25
 
 
 class BilliardsMotion:
@@ -59,13 +60,20 @@ class BilliardsMotion:
         self.tile = min(82, pitch * .88)
         self.radius = pitch * .46
         self.white_radius = round(self.tile) / 2
+        spacing = pitch * .95
+        column_spacing = spacing * math.sqrt(3) / 2
+        apex = min(left + self.width * .72,
+                   right - self.width * .07 - self.radius - (columns - 1) * column_spacing)
+        center_y = (top + bottom) / 2
         self.rack = []
         for column in range(columns):
-            depth = min(column + 1, count - len(self.rack))
-            for i in range(depth):
-                x = left + self.width * .52 + column * pitch * .84
-                y = (top + bottom) / 2 + (i - (depth - 1) / 2) * pitch * .95
-                self.rack.append((x, y))
+            slots = column + 1
+            depth = min(slots, count - len(self.rack))
+            first = (slots - depth) // 2
+            # Keep partial columns on the same staggered lattice as a full rack.
+            for slot in range(first, first + depth):
+                self.rack.append((apex + column * column_spacing,
+                                  center_y + (slot - column / 2) * spacing))
         self.player_count = 1
         self.reset()
 
@@ -76,7 +84,7 @@ class BilliardsMotion:
         self.scores = [0] * self.player_count
         self.shot_start_score = 0
         left, top, _, bottom = self.bounds
-        self.white = Body(left + self.width * .20, (top + bottom) / 2, self.white_radius, self.bounds)
+        self.white = Body(left + self.width * HEAD_SPOT, (top + bottom) / 2, self.white_radius, self.bounds)
         self.icons = [Body(x, y, self.radius, self.bounds) for x, y in self.rack]
         self.bodies = [self.white, *self.icons]
         self.sunk = set()
@@ -108,7 +116,7 @@ class BilliardsMotion:
         if target is None:
             return 1., 0.
         if self.break_shot:
-            return 1., .022
+            return 1., 0.
         shot = self._pocket_shot(targets)
         dx, dy = (shot[0] - x, shot[1] - y) if shot else (target.x - x, target.y - y)
         distance = max(1, math.hypot(dx, dy))
@@ -403,7 +411,7 @@ class BilliardsMotion:
 
     def _auto_place(self):
         left, top, _, _ = self.bounds
-        for fx in (.20, .31, .42, .54, .66, .78):
+        for fx in (HEAD_SPOT, .31, .42, .54, .66, .78):
             for fy in (.5, .31, .69, .19, .81):
                 if self.place_white(left + self.width * fx, top + self.height * fy):
                     return True

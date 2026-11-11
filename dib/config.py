@@ -21,6 +21,29 @@ WINDOW_TITLE = f'{PRODUCT_NAME} {VERSION}'
 BASE = Path(__file__).resolve().parent.parent
 ASSETS = BASE / 'assets'
 ICON_PATH = ASSETS / 'desktop-icon-billiards.ico'
+TABLE_STYLES = {'photo': '木边绿绒', 'classic': '经典桌面'}
+
+
+def load_table_style():
+    directory = os.environ.get('LOCALAPPDATA')
+    if directory:
+        try:
+            style = (Path(directory) / INTERNAL_NAME / 'table-style.txt').read_text(encoding='utf-8').strip()
+            if style in TABLE_STYLES:
+                return style
+        except (OSError, UnicodeError):
+            pass
+    return 'photo'
+
+
+def save_table_style(style):
+    directory = os.environ.get('LOCALAPPDATA')
+    if directory:
+        folder = Path(directory) / INTERNAL_NAME
+        folder.mkdir(parents=True, exist_ok=True)
+        temporary = folder / 'table-style.tmp'
+        temporary.write_text(style, encoding='utf-8')
+        temporary.replace(folder / 'table-style.txt')
 
 DEFAULT_UPDATE_URL = 'https://go.liuxiaogang.com/desktop-icon-billiards-update'
 UPDATE_URL = os.environ.get('DIB_UPDATE_URL', DEFAULT_UPDATE_URL).strip()

@@ -1,11 +1,30 @@
 """Behaviour tests for the manual desktop billiards table."""
 import math
 import unittest
+from itertools import combinations
 
 from dib.table import BilliardsMotion
 
 
 class BilliardsMotionTests(unittest.TestCase):
+    def test_opening_rack_has_no_overlaps_or_balls_in_pockets(self):
+        for photo in (None, (0, 0, 1600, 1000)):
+            for count in (1, 5, 7, 14, 15, 61, 300):
+                with self.subTest(photo=photo is not None, count=count):
+                    game = BilliardsMotion((0, 0, 1600, 1000), [(96, 96)] * count, photo)
+                    left, top, right, bottom = game.bounds
+                    self.assertAlmostEqual(game.white.x, left + game.width / 4)
+                    self.assertEqual(game.aim, (1., 0.))
+                    self.assertGreater(game.icons[0].x, game.white.x)
+                    for body in game.bodies:
+                        self.assertIsNone(game._in_pocket(body))
+                        self.assertLessEqual(left + body.radius, body.x)
+                        self.assertLessEqual(body.x, right - body.radius)
+                        self.assertLessEqual(top + body.radius, body.y)
+                        self.assertLessEqual(body.y, bottom - body.radius)
+                    for a, b in combinations(game.bodies, 2):
+                        self.assertGreaterEqual(math.hypot(a.x - b.x, a.y - b.y), a.radius + b.radius)
+
     def test_flags_and_public_attributes_match_the_manual_contract(self):
         game = BilliardsMotion((0, 0, 1600, 1000), [(64, 64)] * 3)
         self.assertTrue(game.desktop)
