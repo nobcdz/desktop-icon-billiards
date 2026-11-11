@@ -5,7 +5,53 @@ alpha layered windows by the shell.
 """
 import math
 
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
+
+
+BALL_COLORS = (
+    (229, 170, 20), (31, 86, 185), (200, 43, 48), (107, 57, 153),
+    (224, 108, 25), (30, 133, 85), (140, 45, 54), (35, 39, 46),
+)
+
+
+def numbered_ball_art(icon, number):
+    """Render a shaded pool ball with the original icon and its rack number."""
+    side = 96
+    center = (side - 1) / 2
+    palette_index = (number - 1) % 15
+    color = BALL_COLORS[palette_index % len(BALL_COLORS)]
+    ivory = (246, 243, 232)
+    pixels = []
+    for py in range(side):
+        y = (py - center) / center
+        for px in range(side):
+            x = (px - center) / center
+            z2 = 1 - x * x - y * y
+            if z2 <= 0:
+                pixels.append((0, 0, 0, 0))
+                continue
+            z = math.sqrt(z2)
+            light = max(0, -.46 * x - .49 * y + .74 * z)
+            shine = math.exp(-((x + .34) ** 2 + (y + .40) ** 2) / .038)
+            base = ivory if palette_index >= 8 and abs(y) > .52 else color
+            rgb = tuple(min(255, round(channel * (.46 + .54 * light) + 130 * shine))
+                        for channel in base)
+            alpha = min(255, round((1 - math.hypot(x, y)) * center * 255))
+            pixels.append((*rgb, alpha))
+
+    ball = Image.new('RGBA', (side, side))
+    ball.putdata(pixels)
+    emblem = icon.copy()
+    emblem.thumbnail((32, 32), Image.Resampling.LANCZOS)
+    ball.alpha_composite(emblem, ((side - emblem.width) // 2, 32 - emblem.height // 2))
+    draw = ImageDraw.Draw(ball)
+    label = str(number)
+    font = ImageFont.load_default(size=22)
+    if draw.textlength(label, font=font) > 30:
+        font = ImageFont.load_default(size=max(1, int(22 * 30 / draw.textlength(label, font=font))))
+    draw.ellipse((28, 49, 67, 88), fill=ivory, outline=(124, 123, 117), width=1)
+    draw.text((center, 68), label, font=font, anchor='mm', fill=(23, 26, 30))
+    return ball
 
 
 def table_art(table, wallpaper=None):

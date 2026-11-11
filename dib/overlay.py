@@ -20,7 +20,7 @@ import win32gui
 import win32process
 from PIL import Image, ImageDraw, ImageFont
 
-from .art import charge_art, cue_art, guide_art, pocket_particles, table_art, white_art
+from .art import charge_art, cue_art, guide_art, numbered_ball_art, pocket_particles, table_art, white_art
 from .display import monitors
 from .shell import ShellDesktop
 from .table import MIN_SHOT_CHARGE, BilliardsMotion
@@ -336,6 +336,7 @@ class BilliardsOverlay:
         """Build label canvases and the resting pose each icon starts from."""
         self.frame_cache = OrderedDict()
         self.frame_cache_bytes = 0
+        self.poses = []
         for index, (source, (icon, label)) in enumerate(zip(self.sources, self.rects)):
             left = min(icon[0], label[0]) - 40
             top = icon[1] - 48
@@ -368,15 +369,14 @@ class BilliardsOverlay:
                 raise RuntimeError('系统返回了空图标')
             center = (icon[0] + icon[2]) / 2 - left - source.width / 2 + (bounds[0] + bounds[2]) / 2
             bottom = icon[3] - top - source.height + bounds[3]
-            self.sources[index] = source.crop(bounds)
+            diameter = max(bounds[2] - bounds[0], bounds[3] - bounds[1])
+            self.sources[index] = numbered_ball_art(source.crop(bounds), index + 1)
             self.templates.append(frame)
             self.anchors.append((left, top, center, bottom))
             self.drawn.append(None)
-        self.poses = []
-        for source, (left, top, center, bottom) in zip(self.sources, self.anchors):
             # Resting pose at the real desktop position, before the rack is built.
-            self.poses.append((left + center, top + bottom - source.height / 2,
-                               source.width, source.height, 0, 0, 1.0))
+            self.poses.append((left + center, top + bottom - diameter / 2,
+                               diameter, diameter, 0, 0, 1.0))
         self.table = BilliardsMotion(self.primary_bounds, [source.size for source in self.sources])
 
     # -- lifecycle ---------------------------------------------------------
@@ -441,7 +441,7 @@ class BilliardsOverlay:
 
     # -- drawing -----------------------------------------------------------
     def draw_intro(self, now, dt):
-        """Fly the real icons from their desktop positions into the rack."""
+        """Fly the numbered balls from their desktop positions into the rack."""
         transition = self.transition
         transition['elapsed'] += max(0, min(0.05, dt))
         for index, (hwnd, origin) in enumerate(zip(self.windows, transition['origins'])):
@@ -457,8 +457,7 @@ class BilliardsOverlay:
             values[1] += dx / distance * arc
             self.poses[index] = tuple(values)
             cx, cy, width, height, angle, _shift, label = values
-            width = max(1, round(width))
-            height = max(1, round(height))
+            width = height = max(1, round((width + height) / 2))
             template = self.templates[index]
             source = self.sources[index]
             left, top, center, bottom = self.anchors[index]
@@ -482,6 +481,7 @@ class BilliardsOverlay:
         for index, (hwnd, values) in enumerate(zip(self.windows, self.table.poses)):
             self.poses[index] = values
             cx, cy, width, height, angle, _shift, _label = values
+            width = height = max(1, round((width + height) / 2))
             angle = round(angle)
             alpha = 0 if index + 1 in self.table.sunk else 255
             effect = self.table.exit_visual(index + 1) if not alpha else None
