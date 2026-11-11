@@ -43,7 +43,7 @@ class BilliardsMotion:
         count = len(sizes)
         columns = max(1, math.ceil((math.sqrt(8 * count + 1) - 1) / 2))
         pitch = min(94, self.width * .45 / (columns + .5), self.height * .79 / columns)
-        self.tile = min(64, pitch * .70)
+        self.tile = min(82, pitch * .88)
         self.radius = pitch * .46
         self.white_radius = min(25, self.radius * .9)
         self.rack = []
@@ -53,9 +53,15 @@ class BilliardsMotion:
                 x = left + self.width * .52 + column * pitch * .84
                 y = (top + bottom) / 2 + (i - (depth - 1) / 2) * pitch * .95
                 self.rack.append((x, y))
+        self.player_count = 1
         self.reset()
 
-    def reset(self):
+    def reset(self, player_count=None):
+        if player_count is not None:
+            self.player_count = player_count
+        self.current_player = 0
+        self.scores = [0] * self.player_count
+        self.shot_start_score = 0
         left, top, _, bottom = self.bounds
         self.white = Body(left + self.width * .20, (top + bottom) / 2, self.white_radius, self.bounds)
         self.icons = [Body(x, y, self.radius, self.bounds) for x, y in self.rack]
@@ -63,6 +69,7 @@ class BilliardsMotion:
         self.sunk = set()
         self.white_sunk = False
         self.exits = {}
+        self.collision_impulse = 0.
         self.state = 'ready'
         self.ready_for = 0.
         self.round_started_at = None
@@ -146,6 +153,7 @@ class BilliardsMotion:
         self.state = 'stroke'
         self.stroke = 0.
         self.power = self._shot_speed(power)
+        self.shot_start_score = self.scores[self.current_player]
         self.break_shot = False
         return True
 
@@ -247,6 +255,7 @@ class BilliardsMotion:
 
     def step(self, dt, now):
         """Advance the simulation with the runner's monotonic frame clock."""
+        self.collision_impulse = 0.
         dt = max(0, min(.05, dt))
         if self.exits:
             self.exits = {i: (x, y, tx, ty, age + dt) for i, (x, y, tx, ty, age) in self.exits.items()
@@ -290,6 +299,7 @@ class BilliardsMotion:
                     if index == 0:
                         self.white_sunk = True
                     else:
+                        self.scores[self.current_player] += 1
                         self._start_exit(index, body, pocket)
                 else:
                     self._walls(body)
@@ -310,6 +320,8 @@ class BilliardsMotion:
                 body.vx = body.vy = body.impact = body.angle = 0.
             self.charge = 0.
             self.ready_for = 0.
+            if not cleared and (self.white_sunk or self.scores[self.current_player] == self.shot_start_score):
+                self.current_player = (self.current_player + 1) % self.player_count
             if cleared:
                 self.state = 'finished'
             elif self.white_sunk:
@@ -414,6 +426,7 @@ class BilliardsMotion:
         if closing >= 0:
             return
         impulse = -closing * BALL_IMPULSE
+        self.collision_impulse = max(self.collision_impulse, impulse)
         a.vx -= nx * impulse
         a.vy -= ny * impulse
         b.vx += nx * impulse

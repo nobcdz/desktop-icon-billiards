@@ -5,7 +5,7 @@ alpha layered windows by the shell.
 """
 import math
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 
 BALL_COLORS = (
@@ -41,16 +41,18 @@ def numbered_ball_art(icon, number):
 
     ball = Image.new('RGBA', (side, side))
     ball.putdata(pixels)
-    emblem = icon.copy()
-    emblem.thumbnail((32, 32), Image.Resampling.LANCZOS)
-    ball.alpha_composite(emblem, ((side - emblem.width) // 2, 32 - emblem.height // 2))
+    outline = ball.getchannel('A')
+    emblem = ImageOps.contain(icon, (74, 74), Image.Resampling.LANCZOS)
+    ball.alpha_composite(emblem, ((side - emblem.width) // 2, 46 - emblem.height // 2))
     draw = ImageDraw.Draw(ball)
     label = str(number)
-    font = ImageFont.load_default(size=22)
-    if draw.textlength(label, font=font) > 30:
-        font = ImageFont.load_default(size=max(1, int(22 * 30 / draw.textlength(label, font=font))))
-    draw.ellipse((28, 49, 67, 88), fill=ivory, outline=(124, 123, 117), width=1)
-    draw.text((center, 68), label, font=font, anchor='mm', fill=(23, 26, 30))
+    font = ImageFont.load_default(size=19)
+    text_width = draw.textlength(label, font=font)
+    if text_width > 24:
+        font = ImageFont.load_default(size=max(1, int(19 * 24 / text_width)))
+    draw.ellipse((55, 53, 86, 84), fill=ivory, outline=(124, 123, 117), width=1)
+    draw.text((70.5, 68.5), label, font=font, anchor='mm', fill=(23, 26, 30))
+    ball.putalpha(outline)
     return ball
 
 

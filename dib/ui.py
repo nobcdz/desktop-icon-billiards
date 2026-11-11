@@ -28,11 +28,12 @@ from .runner import BilliardsRunner
 from .shell import LayoutSession, ShellDesktop
 from .update import fetch_update, release_entries
 
-BG = '#0d1917'
-PANEL = '#132320'
-TEXT = '#e2f2ec'
-MUTED = '#93aea6'
-ACCENT = '#69ddb3'
+BG = '#091411'
+PANEL = '#172a24'
+TEXT = '#f0fbf3'
+MUTED = '#a5beb1'
+ACCENT = '#a6f47a'
+GOLD = '#f5c56d'
 
 HINTS = {
     'ready': '瞄准 · 长按蓄力 · 松手击球',
@@ -62,6 +63,7 @@ class DesktopBilliardsApp:
         self.watchdog = None
         self.donation = None
         self.closing = False
+        self.player_count = 1
         self.deadline = 0.0
         self.journal = runtime_directory() / 'layout.json'
         root.title(config.WINDOW_TITLE)
@@ -81,10 +83,18 @@ class DesktopBilliardsApp:
                         font=('Microsoft YaHei UI', 9))
         style.configure('Muted.TLabel', background=BG, foreground=MUTED,
                         font=('Microsoft YaHei UI', 8))
+        style.configure('Hero.TLabel', background=BG, foreground=TEXT,
+                        font=('Microsoft YaHei UI', 17, 'bold'))
+        style.configure('Status.TLabel', background=PANEL, foreground=ACCENT,
+                        font=('Microsoft YaHei UI', 10, 'bold'), padding=(12, 9))
         style.configure('StatTitle.TLabel', background=PANEL, foreground=MUTED,
                         font=('Microsoft YaHei UI', 9))
         style.configure('StatValue.TLabel', background=PANEL, foreground=TEXT,
-                        font=('Segoe UI', 20, 'bold'))
+                        font=('Segoe UI', 23, 'bold'))
+        style.configure('Score.TLabel', background=PANEL, foreground=MUTED,
+                        font=('Microsoft YaHei UI', 10, 'bold'), padding=(12, 8))
+        style.configure('Active.Score.TLabel', background='#36572c', foreground='#e2ffcb')
+        style.configure('Winner.Score.TLabel', background='#5b4424', foreground='#fff0c6')
         style.configure('Table.TButton', padding=(11, 6), font=('Microsoft YaHei UI', 9),
                         background=PANEL, foreground=TEXT, borderwidth=0,
                         focusthickness=1, focuscolor=ACCENT)
@@ -92,24 +102,49 @@ class DesktopBilliardsApp:
                   background=[('active', '#1d3531'), ('pressed', '#24423c')],
                   foreground=[('disabled', MUTED)])
         style.configure('Primary.Table.TButton', background=ACCENT, foreground=BG)
-        style.map('Primary.Table.TButton', background=[('pressed', '#4dbb94'), ('active', '#86eac8')])
+        style.map('Primary.Table.TButton', background=[('pressed', '#87d15c'), ('active', '#c3ffa0')])
         style.configure('GuideOn.Table.TButton', background='#234e42', foreground='#a5f8d5')
         style.map('GuideOn.Table.TButton', background=[('pressed', '#1d4438'), ('active', '#2c5e50')])
         style.configure('GuideOff.Table.TButton', background='#303d3b', foreground='#c0cecb')
         style.map('GuideOff.Table.TButton', background=[('pressed', '#25302e'), ('active', '#3d4b48')])
-        style.configure('Donate.Table.TButton', foreground='#f2ca87')
+        style.configure('Donate.Table.TButton', foreground=GOLD)
 
-        header = ttk.Frame(root, padding=(14, 12, 14, 8), style='Panel.TFrame')
-        header.pack(fill='x')
+        tk.Frame(root, bg=ACCENT, height=3).pack(fill='x')
+        hero = ttk.Frame(root, padding=(16, 10, 16, 9), style='Panel.TFrame')
+        hero.pack(fill='x')
+        ttk.Label(hero, text=config.PRODUCT_NAME, style='Hero.TLabel').pack(side='left')
+        ttk.Label(hero, text=f'v{config.VERSION}', style='Muted.TLabel').pack(side='right')
+        controls = ttk.Frame(root, padding=(16, 0, 16, 10), style='Panel.TFrame')
+        controls.pack(fill='x')
+        self.mode_buttons = []
+        for players, title in ((1, '单人'), (2, '双人')):
+            button = ttk.Button(controls, text=title, width=5,
+                                command=lambda count=players: self.change_mode(count),
+                                style='Primary.Table.TButton' if players == 1 else 'Table.TButton')
+            button.pack(side='left', padx=(0, 4))
+            self.mode_buttons.append(button)
         self.status = tk.StringVar(root, value='正在摆球…')
-        ttk.Label(header, textvariable=self.status, width=28, style='Table.TLabel').pack(side='left')
         self.guide_enabled = True
-        self.guide_button = ttk.Button(header, text='辅助线 · 开', width=11, command=self.toggle_guide,
+        self.guide_button = ttk.Button(controls, text='辅助线 · 开', width=9, command=self.toggle_guide,
                                        style='GuideOn.Table.TButton')
         self.guide_button.pack(side='right')
+        self.sound_enabled = False
+        self.sound_button = ttk.Button(controls, text='声音 · 关', width=8, command=self.toggle_sound,
+                                       style='GuideOff.Table.TButton')
+        self.sound_button.pack(side='right', padx=(0, 6))
+        ttk.Label(root, textvariable=self.status, width=33, style='Status.TLabel').pack(
+            fill='x', padx=16, pady=(0, 6))
 
-        stats = ttk.Frame(root, padding=(12, 8), style='Stats.TFrame')
-        stats.pack(fill='x', padx=14)
+        self.scoreboard = ttk.Frame(root, style='Panel.TFrame')
+        self.score_labels = []
+        for player in range(2):
+            label = ttk.Label(self.scoreboard, text=f'玩家 {player + 1}   0 分', style='Score.TLabel')
+            label.pack(side='left', fill='x', expand=True, padx=(0, 3) if player == 0 else (3, 0))
+            self.score_labels.append(label)
+
+        stats = ttk.Frame(root, style='Panel.TFrame')
+        stats.pack(fill='x', padx=16)
+        self.stats = stats
         self.time_title = tk.StringVar(root, value='本局用时')
         self.time_value = tk.StringVar(root, value='00:00')
         self.count_title = tk.StringVar(root, value='图标入袋')
@@ -120,8 +155,10 @@ class DesktopBilliardsApp:
                                                 (self.count_title, self.count_value),
                                                 (remaining_title, self.remaining_value))):
             stats.columnconfigure(column, weight=1, uniform='stats')
-            ttk.Label(stats, textvariable=title, style='StatTitle.TLabel').grid(row=0, column=column, sticky='w')
-            ttk.Label(stats, textvariable=value, style='StatValue.TLabel').grid(row=1, column=column, sticky='w')
+            card = ttk.Frame(stats, padding=(11, 7), style='Stats.TFrame')
+            card.grid(row=0, column=column, sticky='nsew', padx=(0, 6) if column < 2 else 0)
+            ttk.Label(card, textvariable=title, style='StatTitle.TLabel').pack(anchor='w')
+            ttk.Label(card, textvariable=value, style='StatValue.TLabel').pack(anchor='w')
 
         bar = ttk.Frame(root, padding=(14, 10, 14, 7), style='Panel.TFrame')
         bar.pack(fill='x')
@@ -135,7 +172,6 @@ class DesktopBilliardsApp:
         footer = ttk.Frame(root, padding=(14, 0, 14, 9), style='Panel.TFrame')
         footer.pack(fill='x')
         ttk.Label(footer, text='Esc / Ctrl+Alt+X 退出并恢复桌面', style='Muted.TLabel').pack(side='left')
-        ttk.Label(footer, text=f'v{config.VERSION}', style='Muted.TLabel').pack(side='right')
         self.update_results = queue.SimpleQueue()
         self.update_feedback = tk.StringVar(root)
         ttk.Label(footer, textvariable=self.update_feedback, width=14, anchor='e',
@@ -156,7 +192,7 @@ class DesktopBilliardsApp:
             self.donation.lift()
             return
         try:
-            with Image.open(config.ASSETS / 'donation.jpg') as source:
+            with Image.open(config.ASSETS / 'donation.png') as source:
                 image = source.convert('RGB')
             image.thumbnail((340, 340), Image.Resampling.LANCZOS)
         except OSError:
@@ -249,6 +285,9 @@ class DesktopBilliardsApp:
             with dpi_context(-4):
                 overlay = BilliardsOverlay(desktop, items)
                 overlay.guide_enabled = self.guide_enabled
+                overlay.sound_enabled = self.sound_enabled
+                if self.player_count == 2:
+                    overlay.request_restart(self.player_count)
             self.watchdog = self.spawn_watchdog()
             self.runner = BilliardsRunner(overlay)
             self.runner.start()
@@ -302,6 +341,20 @@ class DesktopBilliardsApp:
                     label = '白球入袋 · 等其他球停稳'
                 elif state == 'ready' and table.charge:
                     label = '松手击球'
+                if table.player_count == 2:
+                    scores = tuple(table.scores)
+                    winner = None
+                    if state == 'finished':
+                        if scores[0] == scores[1]:
+                            label = '清台 · 平局'
+                        else:
+                            winner = scores.index(max(scores))
+                            label = f'清台 · 玩家 {winner + 1} 获胜'
+                    for player, score_label in enumerate(self.score_labels):
+                        active = state != 'finished' and player == table.current_player
+                        score_style = 'Winner.Score.TLabel' if player == winner else (
+                            'Active.Score.TLabel' if active else 'Score.TLabel')
+                        score_label.configure(text=f'玩家 {player + 1}   {scores[player]} 分', style=score_style)
                 self.status.set(label)
                 minutes, seconds = divmod(table.round_seconds, 60)
                 self.time_value.set(f'{minutes:02d}:{seconds:02d}')
@@ -317,8 +370,23 @@ class DesktopBilliardsApp:
             self.fail(exc)
 
     def restart(self):
-        if self.runner and self.runner.shown.is_set():
-            self.runner.overlay.request_restart()
+        if self.runner:
+            self.runner.overlay.request_restart(self.player_count)
+
+    def change_mode(self, player_count):
+        if player_count == self.player_count:
+            return
+        self.player_count = player_count
+        for players, button in enumerate(self.mode_buttons, 1):
+            button.configure(style='Primary.Table.TButton' if players == player_count else 'Table.TButton')
+        if player_count == 2:
+            for player, label in enumerate(self.score_labels):
+                label.configure(text=f'玩家 {player + 1}   0 分',
+                                style='Active.Score.TLabel' if player == 0 else 'Score.TLabel')
+            self.scoreboard.pack(before=self.stats, fill='x', padx=16, pady=(0, 6))
+        else:
+            self.scoreboard.pack_forget()
+        self.restart()
 
     def toggle_guide(self):
         self.guide_enabled = not self.guide_enabled
@@ -326,6 +394,13 @@ class DesktopBilliardsApp:
                                     style='GuideOn.Table.TButton' if self.guide_enabled else 'GuideOff.Table.TButton')
         if self.runner:
             self.runner.overlay.guide_enabled = self.guide_enabled
+
+    def toggle_sound(self):
+        self.sound_enabled = not self.sound_enabled
+        self.sound_button.configure(text='声音 · 开' if self.sound_enabled else '声音 · 关',
+                                    style='GuideOn.Table.TButton' if self.sound_enabled else 'GuideOff.Table.TButton')
+        if self.runner:
+            self.runner.overlay.sound_enabled = self.sound_enabled
 
     def fail(self, error):
         try:

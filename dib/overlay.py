@@ -9,9 +9,10 @@ from __future__ import annotations
 import ctypes
 import math
 import struct
-import threading
+import winsound
 from collections import OrderedDict
 from ctypes import wintypes as W
+from queue import Empty, SimpleQueue
 
 import comtypes
 import win32api
@@ -21,6 +22,7 @@ import win32process
 from PIL import Image, ImageDraw, ImageFont
 
 from .art import charge_art, cue_art, guide_art, numbered_ball_art, pocket_particles, table_art, white_art
+from .config import ASSETS
 from .display import monitors
 from .shell import ShellDesktop
 from .table import MIN_SHOT_CHARGE, BilliardsMotion
@@ -261,10 +263,12 @@ class BilliardsOverlay:
         self.drawn = []
         self.poses = []
         self.transition = None
-        self.restart_requested = threading.Event()
+        self.restart_requests = SimpleQueue()
         self.pointer = TablePointer()
         self.table_windows = {}
         self.guide_enabled = True
+        self.sound_enabled = False
+        self.sound_until = 0.
         self.guide_key = None
         self.cue_key = None
         self.charge_key = None
@@ -401,8 +405,8 @@ class BilliardsOverlay:
             self.close()
             raise
 
-    def request_restart(self):
-        self.restart_requested.set()
+    def request_restart(self, player_count):
+        self.restart_requests.put(player_count)
 
     def draw(self, now, dt):
         if self.desktop.get_geometry() != self.geometry:
@@ -414,17 +418,47 @@ class BilliardsOverlay:
         if self.transition is not None:
             self.draw_intro(now, dt)
         else:
-            if self.restart_requested.is_set():
-                self.restart_requested.clear()
-                self.table.reset()
+            try:
+                player_count = self.restart_requests.get_nowait()
+            except Empty:
+                pass
+            else:
+                self.table.reset(player_count)
                 self.pointer = TablePointer()
                 self.drawn = [None] * len(self.items)
             self.update_pointer(now)
+            pocketed_before = self.table.pocketed_icons
             self.table.step(dt, now)
+            self.play_table_sound(now, self.table.pocketed_icons > pocketed_before)
             self.draw_balls()
         self.draw_table()
         self.draw_guide()
         self.draw_charge()
+
+    def play_table_sound(self, now, pocketed):
+        if not self.sound_enabled:
+            if self.sound_until:
+                self.stop_table_sound()
+            return
+        if pocketed:
+            sound, cooldown = 'pocket.wav', .49
+        elif now >= self.sound_until and self.table.collision_impulse >= self.table.height * .018:
+            sound, cooldown = 'collision.wav', .075
+        else:
+            return
+        try:
+            winsound.PlaySound(str(ASSETS / sound),
+                               winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+        except RuntimeError:
+            return
+        self.sound_until = now + cooldown
+
+    def stop_table_sound(self):
+        try:
+            winsound.PlaySound(None, 0)
+        except RuntimeError:
+            pass
+        self.sound_until = 0.
 
     def update_pointer(self, now):
         screen = win32gui.GetCursorPos()
@@ -656,6 +690,8 @@ class BilliardsOverlay:
     def close(self):
         if self.was_visible and win32gui.IsWindow(self.listview):
             win32gui.ShowWindow(self.listview, win32con.SW_SHOWNA)
+        if self.sound_until:
+            self.stop_table_sound()
         self.clear_table()
         for surface in self.surfaces.values():
             surface.close()
