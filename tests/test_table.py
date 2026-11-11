@@ -90,7 +90,7 @@ class BilliardsMotionTests(unittest.TestCase):
         second = game.icons[1]
         moved = False
         reflected = False
-        for frame in range(460):
+        for frame in range(500):
             game.step(.012, .45 + frame * .012)
             moved |= second.vx > 50
             reflected |= moved and second.vx < -30

@@ -58,6 +58,7 @@ a = Analysis(
         (os.path.join(base_dir, 'assets', 'donation.png'), 'assets'),
         (os.path.join(base_dir, 'assets', 'collision.wav'), 'assets'),
         (os.path.join(base_dir, 'assets', 'pocket.wav'), 'assets'),
+        (os.path.join(base_dir, 'assets', 'table.png'), 'assets'),
     ],
     hiddenimports=[
         # app.pyw dispatches --watchdog to this module from inside main(); list

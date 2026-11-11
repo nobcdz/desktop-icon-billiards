@@ -6,7 +6,7 @@
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/nobcdz/desktop-icon-billiards/releases) 下载单文件程序，双击 `DesktopIconBilliards-<版本>-win-x64.exe` 即可运行。下文以 **v0.1.6 源码**为准，可按文末步骤构建该版本。
+从 [GitHub Releases](https://github.com/nobcdz/desktop-icon-billiards/releases) 下载单文件程序，双击 `DesktopIconBilliards-<版本>-win-x64.exe` 即可运行。下文以 **v0.1.7 源码**为准，可按文末步骤构建该版本。
 
 ## 快速上手
 
@@ -54,7 +54,7 @@ EXE 输出到 `dist/`。版本取自 `dib/__init__.py`，构建脚本会打印�
 
 ## 桌面恢复与隐私
 
-游戏需要桌面图标处于显示状态，同一时间运行一个实例。游戏图层通过 Windows Shell 读取图标缩略图和布局，台面背景取自本地壁纸。程序不截取桌面画面，也不录音。
+游戏需要桌面图标处于显示状态，同一时间运行一个实例。游戏图层通过 Windows Shell 读取图标缩略图和布局。随程序附带的球台图片会按原比例显示在主屏幕工作区，Windows 壁纸保持原样。程序不截取桌面画面，也不录音。
 
 退出时会恢复桌面图标。若进程异常退出，独立看门狗会尝试恢复。运行日志和恢复记录位于 `%TEMP%\DesktopIconBilliards`。游戏期间更改屏幕布局、分辨率或 DPI 会结束本局并恢复桌面。
 

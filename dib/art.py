@@ -97,6 +97,13 @@ def table_art(table, wallpaper=None):
     return frame, origin_x, origin_y
 
 
+def table_photo(work_area, source):
+    """Fit the complete table photo inside the monitor without stretching it."""
+    left, top, right, bottom = work_area
+    frame = ImageOps.contain(source.convert('RGBA'), (right - left, bottom - top), Image.Resampling.LANCZOS)
+    return frame, left + (right - left - frame.width) // 2, top + (bottom - top - frame.height) // 2
+
+
 def charge_art(percent, font):
     """Draw the charge label and its filled progress bar."""
     pad = max(4, font.size // 2)

@@ -22,17 +22,23 @@ STOP_SPEED = .008
 class BilliardsMotion:
     """Positions and physics of the white ball and the desktop icon rack."""
 
-    def __init__(self, work_area, sizes):
+    def __init__(self, work_area, sizes, photo_rect=None):
         self.sizes = sizes
         # The game is always drawn directly on the desktop and always manual.
         self.desktop = True
         self.manual = True
         self.work_area = work_area
+        self.photo_rect = photo_rect
         left, top, right, bottom = work_area
         width = right - left
         height = bottom - top
         self.bounds = (round(left + width * .06), round(top + height * .09),
                        round(right - width * .06), round(bottom - height * .09))
+        if photo_rect is not None:
+            x, y, photo_width, photo_height = photo_rect
+            # Inside edges of the cushions in assets/table.png.
+            self.bounds = (round(x + photo_width * .05), round(y + photo_height * .132),
+                           round(x + photo_width * .95), round(y + photo_height * .861))
         left, top, right, bottom = self.bounds
         self.width = right - left
         self.height = bottom - top
@@ -40,12 +46,19 @@ class BilliardsMotion:
         self.pockets = ((left, top), (mid, top), (right, top),
                         (left, bottom), (mid, bottom), (right, bottom))
         self.pocket_radius = min(49, max(18, self.height * .047))
+        if photo_rect is not None:
+            # Centers of the six pictured pockets, measured as image fractions.
+            self.pockets = tuple((x + photo_width * px, y + photo_height * py) for px, py in (
+                (.042, .12), (.5, .104), (.958, .12),
+                (.042, .875), (.5, .892), (.958, .875),
+            ))
+            self.pocket_radius = photo_height * .043
         count = len(sizes)
         columns = max(1, math.ceil((math.sqrt(8 * count + 1) - 1) / 2))
         pitch = min(94, self.width * .45 / (columns + .5), self.height * .79 / columns)
         self.tile = min(82, pitch * .88)
         self.radius = pitch * .46
-        self.white_radius = min(25, self.radius * .9)
+        self.white_radius = round(self.tile) / 2
         self.rack = []
         for column in range(columns):
             depth = min(column + 1, count - len(self.rack))
@@ -237,7 +250,7 @@ class BilliardsMotion:
             if entry is not None and entry < distance:
                 distance, kind, contact = entry, 'ball', body
         for px, py in self.pockets:
-            entry = self._ray_circle(x, y, dx, dy, px, py, self.pocket_radius + radius * .55)
+            entry = self._ray_circle(x, y, dx, dy, px, py, self._capture_radius(px, py, radius))
             if entry is not None and entry <= distance:
                 distance, kind, contact = entry, 'pocket', None
         speed = math.sqrt(max(0., speed ** 2 - 2 * drag * distance))
@@ -331,13 +344,25 @@ class BilliardsMotion:
                 self.aim = self._aim()
         self.poses = self._poses()
 
+    def _capture_radius(self, px, py, radius):
+        capture = self.pocket_radius + radius * .55
+        if self.photo_rect is not None:
+            left, top, right, bottom = self.bounds
+            x = min(max(px, left + radius), right - radius)
+            y = min(max(py, top + radius), bottom - radius)
+            # An offset pocket must still be reachable before the ball rebounds.
+            capture = max(capture, math.hypot(x - px, y - py) + radius * .15)
+        return capture
+
     def _in_pocket(self, body):
-        capture = self.pocket_radius + body.radius * .55
         return next(((x, y) for x, y in self.pockets
-                     if (body.x - x) ** 2 + (body.y - y) ** 2 < capture * capture), None)
+                     if math.hypot(body.x - x, body.y - y) < self._capture_radius(x, y, body.radius)), None)
 
     def _start_exit(self, index, body, pocket):
         px, py = pocket
+        if self.photo_rect is not None:
+            self.exits[index] = (body.x, body.y, px, py, 0.)
+            return
         left, top, right, bottom = self.work_area
         rail_left, rail_top, rail_right, _ = self.bounds
         # Keep the icon and the small particle halo inside the outer work area.

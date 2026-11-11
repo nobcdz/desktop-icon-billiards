@@ -21,12 +21,11 @@ import win32gui
 import win32process
 from PIL import Image, ImageDraw, ImageFont
 
-from .art import charge_art, cue_art, guide_art, numbered_ball_art, pocket_particles, table_art, white_art
+from .art import charge_art, cue_art, guide_art, numbered_ball_art, pocket_particles, table_art, table_photo, white_art
 from .config import ASSETS
 from .display import monitors
 from .shell import ShellDesktop
 from .table import MIN_SHOT_CHARGE, BilliardsMotion
-from .wallpaper import primary_wallpaper
 
 BALL_CANVAS = 128
 INTRO_DURATION = 1.25
@@ -284,8 +283,6 @@ class BilliardsOverlay:
         self.rects = [[map_rect(rect, list_origin, parent_origin) for rect in pair]
                       for pair in item_rects(self.listview, len(items))]
         primary = next(m for m in self.monitor_state if m[4])
-        self.primary_screen = primary[1]
-        self.primary_work = primary[2]
         self.primary_bounds = map_rect(primary[2], (0, 0), parent_origin)
         self.charge_font = _load_font(max(12, round(14 * primary[3] / 96)))
         left, top, right, bottom = win32gui.GetClientRect(self.parent)
@@ -325,18 +322,21 @@ class BilliardsOverlay:
                 source = artwork(item['id'], size)
                 source.thumbnail((size, size), Image.Resampling.LANCZOS)
                 self.sources.append(source)
-            self.build_templates()
-            screens = [monitor[1] for monitor in self.monitor_state]
-            desktop_bounds = (min(rect[0] for rect in screens), min(rect[1] for rect in screens),
-                              max(rect[2] for rect in screens), max(rect[3] for rect in screens))
-            wallpaper = primary_wallpaper(self.primary_screen, desktop_bounds)
-            if wallpaper is not None:
-                wallpaper = wallpaper.crop(map_rect(self.primary_work, (0, 0), self.primary_screen[:2]))
-            self.rail_frame = table_art(self.table, wallpaper)
+            try:
+                with Image.open(ASSETS / 'table.png') as source:
+                    photo = table_photo(self.primary_bounds, source)
+            except OSError:
+                photo = None
+            photo_rect = None
+            if photo is not None:
+                frame, x, y = photo
+                photo_rect = (x, y, frame.width, frame.height)
+            self.build_templates(photo_rect)
+            self.rail_frame = photo if photo is not None else table_art(self.table)
         finally:
             comtypes.CoUninitialize()
 
-    def build_templates(self):
+    def build_templates(self, photo_rect=None):
         """Build label canvases and the resting pose each icon starts from."""
         self.frame_cache = OrderedDict()
         self.frame_cache_bytes = 0
@@ -381,7 +381,7 @@ class BilliardsOverlay:
             # Resting pose at the real desktop position, before the rack is built.
             self.poses.append((left + center, top + bottom - diameter / 2,
                                diameter, diameter, 0, 0, 1.0))
-        self.table = BilliardsMotion(self.primary_bounds, [source.size for source in self.sources])
+        self.table = BilliardsMotion(self.primary_bounds, [source.size for source in self.sources], photo_rect)
 
     # -- lifecycle ---------------------------------------------------------
     def show(self, snapshot, journal):
@@ -568,7 +568,7 @@ class BilliardsOverlay:
                               win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE | flags)
 
     def stack_table_windows(self):
-        """Keep the wallpaper behind the icons and the shot controls above them."""
+        """Keep the table behind the icons and the shot controls above them."""
         self.position_layer(self.table_windows['guide'], win32con.HWND_BOTTOM)
         self.position_layer(self.table_windows['rail'], win32con.HWND_BOTTOM)
         for part in ('white', 'cue', 'charge'):
